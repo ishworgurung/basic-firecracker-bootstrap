@@ -3,7 +3,7 @@
 # sourced from https://github.com/firecracker-microvm/firecracker/tree/master/docs
 set -euf -o pipefail
 
-echo "#########################################################"
+echo "###############################################################"
 echo "make sure prerequisites are met."
 echo "https://github.com/firecracker-microvm/firecracker/blob/master/docs/getting-started.md#prerequisites"
 echo "make sure tmux is installed (for tty) and you have sudo superpower (for host networking setup)."
@@ -11,15 +11,14 @@ echo "###############################################################"
 read
 
 ###############
-
 # Host configs
 TTY_CONSOLE=console$(( ${RANDOM} % 4 ))
 DNS_IPADDR=172.19.0.2
-WAN_IF=wlan0
+WAN_DEV=wlan0
 TAP_DEV=tap0
 FIRECRACKER_UDS="/tmp/firecracker.socket.${RANDOM}"
 
-# Guest networking
+# Guest network parameters
 GUEST_GW=172.21.0.1
 GUEST_NET=172.21.0.1/24
 GUEST_IPADDR=172.21.0.3
@@ -27,13 +26,11 @@ GUEST_IPADDR=172.21.0.3
 # Guest hardware
 GUEST_VCPUs=2
 GUEST_MEM_MiB=2048
-
 ############
 
 arch=$(uname -m)
-dest_kernel="hello-vmlinux.bin"
-dest_rootfs="hello-rootfs.ext4"
-image_bucket_url="https://s3.amazonaws.com/spec.ccfc.min/img"
+dest_kernel="vmlinux.bin"
+dest_rootfs="rootfs.ext4"
 
 init() {
   rm -f ${FIRECRACKER_UDS}
@@ -43,12 +40,10 @@ init() {
 } && init
 
 get_guest_kernel_rootfs() {
+  local image_bucket_url="https://s3.amazonaws.com/spec.ccfc.min/img"
   if [ ${arch} = "x86_64" ]; then
     kernel="${image_bucket_url}/hello/kernel/hello-vmlinux.bin"
     rootfs="${image_bucket_url}/hello/fsfiles/hello-rootfs.ext4"
-  elif [ ${arch} = "aarch64" ]; then
-    kernel="${image_bucket_url}/aarch64/ubuntu_with_ssh/kernel/vmlinux.bin"
-    rootfs="${image_bucket_url}/aarch64/ubuntu_with_ssh/fsfiles/xenial.rootfs.ext4"
   else
     echo "Cannot run firecracker on $arch architecture!"
     exit 1
@@ -60,7 +55,6 @@ get_guest_kernel_rootfs() {
 
   echo "Saved kernel file to $dest_kernel and root block device to $dest_rootfs."
 } 
-
 if [[ ! -f "${dest_kernel}" ]] || [[ ! -f "${dest_rootfs}" ]]; then
   get_guest_kernel_rootfs
 fi
@@ -89,20 +83,18 @@ set_guest_rootfs() {
      }"
 } && set_guest_rootfs
 
-set_guest_networking() {
+set_host_networking() {
   sudo ip link del ${TAP_DEV} || true
-  sudo iptables -t nat -X
-  sudo iptables -t nat -F
-  sudo iptables -X
-  sudo iptables -F
   sudo ip tuntap add ${TAP_DEV} mode tap
   sudo ip addr add ${GUEST_NET} dev ${TAP_DEV}
   sudo ip link set ${TAP_DEV} up
   sudo sh -c "echo 1 > /proc/sys/net/ipv4/ip_forward"
-  sudo iptables -t nat -A POSTROUTING -o ${WAN_IF} -j MASQUERADE
+  sudo iptables -t nat -A POSTROUTING -o ${WAN_DEV} -j MASQUERADE
   sudo iptables -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-  sudo iptables -A FORWARD -i ${TAP_DEV} -o ${WAN_IF} -j ACCEPT
+  sudo iptables -A FORWARD -i ${TAP_DEV} -o ${WAN_DEV} -j ACCEPT
+} && set_host_networking
 
+set_guest_networking() {
   curl -X PUT \
   --unix-socket ${FIRECRACKER_UDS} \
   http://localhost/network-interfaces/eth0 \
@@ -115,7 +107,7 @@ set_guest_networking() {
     }"
 } && set_guest_networking
 
-start_guest_microvm() {
+set_guest_hardware() {
   curl --unix-socket ${FIRECRACKER_UDS} -i  \
     -X PUT 'http://localhost/machine-config' \
     -H 'Accept: application/json'            \
@@ -125,7 +117,9 @@ start_guest_microvm() {
         \"mem_size_mib\": ${GUEST_MEM_MiB},
         \"ht_enabled\": false
     }"
+} && set_guest_hardware
 
+start_guest_microvm() {
   curl --unix-socket ${FIRECRACKER_UDS} -i \
     -X PUT 'http://localhost/actions'       \
     -H  'Accept: application/json'          \
@@ -136,7 +130,8 @@ start_guest_microvm() {
 } && start_guest_microvm
 
 show_setup_notes() {
-  echo "[*] do the following in a different terminal window:"
+  echo "[*] optionally, if the network setup is not primed in rootfs, "
+  echo "    then do the following in a different terminal window:"
   echo "[+] attach to the session"
   echo "[+] login to tty (root/root)"
   echo "[+] setup networking"
